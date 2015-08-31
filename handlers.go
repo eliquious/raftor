@@ -1,14 +1,10 @@
 package raftor
 
-// ClusterChangeHandler is used to process ClusterChangeEvents.
-type ClusterChangeHandler interface {
+import "github.com/coreos/etcd/raft/raftpb"
 
-	// HandleJoin is called when a node joins the cluster.
-	HandleJoin(ClusterChangeEvent)
+// RemoteMessageHandler handles messages from a remote node.
+type RemoteMessageHandler interface {
 
-	// HandleJoin is called when a node leaves the cluster.
-	HandleLeave(ClusterChangeEvent)
-
-	// HandleJoin is called when a node is updated.
-	HandleUpdate(ClusterChangeEvent)
+	// HandleRemoteMessage is called when a message is recieved from a remote node.
+	HandleRemoteMessage(msg raftpb.Message)
 }
