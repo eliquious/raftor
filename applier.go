@@ -10,11 +10,11 @@ import (
 
 // Commit is used to send to the cluster to save either a snapshot or log entries.
 type Commit struct {
-	State    RaftState
-	Entries  []raftpb.Entry
-	Snapshot raftpb.Snapshot
-	Messages []raftpb.Message
-	Context  context.Context
+	State            RaftState
+	CommittedEntries []raftpb.Entry
+	Snapshot         raftpb.Snapshot
+	Messages         []raftpb.Message
+	Context          context.Context
 }
 
 // RaftState describes the state of the Raft cluster for each commit
