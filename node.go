@@ -20,17 +20,22 @@ type RaftNode interface {
 	ProposalHandler
 	Notifier
 	Starter
+	Applier
 	raft.Node
+	wait.Wait
+
+	// Commit
+	Commit() chan Commit
 }
 
 // A RaftNodeFactory generates a RaftNode based on a parent context.Context and a Cluster.
 type RaftNodeFactory func(context.Context, Cluster) RaftNode
 
 // NewRaftNode creates a new RaftNode from the context.Context and the given Cluster.
-func NewRaftNode(ctx context.Context, cluster Cluster) RaftNode {
+func NewRaftNode(ctx context.Context, cfg ClusterConfig, tr Transporter) RaftNode {
 	var mu sync.Mutex
 	var peers []raft.Peer
-	cfg := cluster.Config()
+	// cfg := cluster.Config()
 	node := raft.StartNode(&cfg.Raft, peers)
 	hash := murmur.Murmur3([]byte(cfg.LocalNodeName), murmur.M3Seed)
 
@@ -41,9 +46,9 @@ func NewRaftNode(ctx context.Context, cluster Cluster) RaftNode {
 		hash:            hash,
 		lt:              time.Now(),
 		Node:            node,
-		cluster:         cluster,
 		parentContext:   ctx,
 		cfg:             cfg.Raft,
+		transporter:     tr,
 		raftStorage:     raft.NewMemoryStorage(),
 		snapshotStorage: cfg.SnapshotStorage,
 		mu:              mu,
@@ -72,7 +77,9 @@ type raftNode struct {
 	// node raft.Node
 	raft.Node
 
-	cluster         Cluster
+	applier     Applier
+	transporter Transporter
+	// cluster         Cluster
 	parentContext   context.Context
 	raftStorage     *raft.MemoryStorage
 	snapshotStorage SnapshotStorage
@@ -86,28 +93,36 @@ type raftNode struct {
 	ticker <-chan time.Time
 
 	// Channels
+	applyc  chan Commit
 	notifyc chan ClusterChangeEvent
 	propc   chan *Proposal
-	// stopped chan struct{}
-	// done    chan struct{}
 }
 
 func (r *raftNode) Notify(evt ClusterChangeEvent) {
 	r.notifyc <- evt
 }
 
+func (r *raftNode) Register(id uint64) <-chan interface{} {
+	return r.w.Register(id)
+}
+
+func (r *raftNode) Trigger(id uint64, x interface{}) {
+	r.w.Trigger(id, x)
+}
+
+func (r *raftNode) Apply(e raftpb.Entry) {
+	atomic.StoreUint64(&r.index, e.Index)
+	atomic.StoreUint64(&r.term, e.Term)
+}
+
 // start prepares and starts raftNode in a new goroutine. It is no longer safe
 // to modify the fields after it has been started.
 // TODO: Ideally raftNode should get rid of the passed in server structure.
 func (r *raftNode) Start() {
-	// r.applyc = make(chan apply)
-	// r.stopped = make(chan struct{})
-	// r.done = make(chan struct{})
+	r.applyc = make(chan Commit)
+	defer close(r.applyc)
 
-	// go func() {
 	var syncC <-chan time.Time
-
-	// defer r.onStop()
 	for {
 		select {
 
@@ -149,6 +164,7 @@ func (r *raftNode) Start() {
 
 			// Create commit context
 			ctx, cancel := context.WithCancel(r.parentContext)
+			errorc := make(chan error)
 
 			// Create commit
 			commit := Commit{
@@ -164,10 +180,11 @@ func (r *raftNode) Start() {
 				Snapshot:         rd.Snapshot,
 				Messages:         rd.Messages,
 				Context:          ctx,
+				Errorc:           errorc,
 			}
 
 			// Apply commit
-			r.cluster.Apply(commit)
+			r.applyc <- commit
 
 			// Save snapshot if there is one
 			if !raft.IsEmptySnap(rd.Snapshot) {
@@ -191,9 +208,10 @@ func (r *raftNode) Start() {
 			r.raftStorage.Append(rd.Entries)
 
 			// Send to other nodes
-			r.cluster.Send(rd.Messages)
+			r.transporter.Send(rd.Messages)
 
 			select {
+
 			// Wait for commit to be applied
 			case <-ctx.Done():
 
@@ -219,6 +237,10 @@ func (r *raftNode) Start() {
 			return
 		}
 	}
+}
+
+func (r *raftNode) Commit() chan Commit {
+	return r.applyc
 }
 
 func (r *raftNode) handleConfChange(evt ClusterChangeEvent) {
