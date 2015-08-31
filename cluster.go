@@ -24,9 +24,9 @@ type ClusterChangeEvent struct {
 
 // Cluster maintains an active list of nodes in the cluster. Cluster is also responsible for reporting and responding to changes in cluster membership.
 type Cluster interface {
-	Notifier
 	Applier
 	Updater
+	Sender
 
 	// ID represents the cluster ID.
 	ID() uint64
@@ -43,6 +43,9 @@ type Cluster interface {
 
 	// LocalNode returns the RaftNode which represents the local node of the cluster.
 	LocalNode() RaftNode
+
+	// Config returns the ClusterConfig which was used to start the cluster.
+	Config() ClusterConfig
 
 	// Stop stops the cluster and triggers the context when finished.
 	Stop(context.Context)
