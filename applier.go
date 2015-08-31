@@ -15,6 +15,7 @@ type Commit struct {
 	Snapshot         raftpb.Snapshot
 	Messages         []raftpb.Message
 	Context          context.Context
+	Errorc           chan error
 }
 
 // RaftState describes the state of the Raft cluster for each commit
@@ -31,5 +32,5 @@ type RaftState struct {
 type Applier interface {
 
 	// Apply processes commit messages after being processed by Raft
-	Apply(Commit)
+	Apply(raftpb.Entry) error
 }
