@@ -24,6 +24,8 @@ type RaftNode interface {
 	raft.Node
 	wait.Wait
 
+	Snapshot(snapi uint64, confState raftpb.ConfState)
+
 	// Commit
 	Commit() chan Commit
 }
@@ -110,9 +112,14 @@ func (r *raftNode) Trigger(id uint64, x interface{}) {
 	r.w.Trigger(id, x)
 }
 
-func (r *raftNode) Apply(e raftpb.Entry) {
+func (r *raftNode) Apply(e raftpb.Entry) error {
 	atomic.StoreUint64(&r.index, e.Index)
 	atomic.StoreUint64(&r.term, e.Term)
+	return nil
+}
+
+func (r *raftNode) CreateSnapshot(i uint64, cs *raftpb.ConfState, data []byte) (raftpb.Snapshot, error) {
+	return r.raftStorage.CreateSnapshot(i, cs, data)
 }
 
 // start prepares and starts raftNode in a new goroutine. It is no longer safe
@@ -434,6 +441,9 @@ func (r *raftNode) proposeMessage(p *Proposal) {
 		// // Send context error
 		// m.Errorc <- m.Context.Err()
 	}
+}
+
+func (r *raftNode) Snapshot(snapi uint64, confState raftpb.ConfState) {
 }
 
 // // sync proposes a SYNC request and is non-blocking.

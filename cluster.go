@@ -170,7 +170,7 @@ func (c *cluster) start() {
 			// trigger snapshot
 			if appliedi-snapi > c.config.SnapshotCount {
 				c.config.Raft.Logger.Infof("start to snapshot (applied: %d, lastsnap: %d)", appliedi, snapi)
-				c.snapshot(appliedi, confState)
+				c.raftNode.Snapshot(appliedi, confState)
 				snapi = appliedi
 			}
 		case <-c.context.Done():
@@ -188,7 +188,7 @@ func (c *cluster) apply(es []raftpb.Entry, confState *raftpb.ConfState) (uint64,
 	var applied uint64
 	var shouldstop bool
 	var err error
-	for i, e := range es {
+	for _, e := range es {
 		switch e.Type {
 		case raftpb.EntryNormal:
 
@@ -222,7 +222,7 @@ func (c *cluster) apply(es []raftpb.Entry, confState *raftpb.ConfState) (uint64,
 // applyConfChange applies a ConfChange to the server. It is only
 // invoked with a ConfChange that has already passed through Raft
 func (c *cluster) applyConfChange(cc raftpb.ConfChange, confState *raftpb.ConfState) (bool, error) {
-	*confState = *s.r.ApplyConfChange(cc)
+	*confState = *c.raftNode.ApplyConfChange(cc)
 	switch cc.Type {
 	case raftpb.ConfChangeAddNode:
 		c.transporter.Update(ClusterChangeEvent{
@@ -241,49 +241,6 @@ func (c *cluster) applyConfChange(cc raftpb.ConfChange, confState *raftpb.ConfSt
 		})
 	}
 	return false, nil
-}
-
-// TODO: non-blocking snapshot
-func (c *cluster) snapshot(snapi uint64, confState raftpb.ConfState) {
-	clone := s.store.Clone()
-
-	go func() {
-		d, err := clone.SaveNoCopy()
-		// TODO: current store will never fail to do a snapshot
-		// what should we do if the store might fail?
-		if err != nil {
-			c.config.Raft.Logger.Panicf("store save should never fail: %v", err)
-		}
-		snap, err := s.r.raftStorage.CreateSnapshot(snapi, &confState, d)
-		if err != nil {
-			// the snapshot was done asynchronously with the progress of raft.
-			// raft might have already got a newer snapshot.
-			if err == raft.ErrSnapOutOfDate {
-				return
-			}
-			c.config.Raft.Logger.Panicf("unexpected create snapshot error %v", err)
-		}
-		if err := s.r.storage.SaveSnap(snap); err != nil {
-			c.config.Raft.Logger.Fatalf("save snapshot error: %v", err)
-		}
-		c.config.Raft.Logger.Infof("saved snapshot at index %d", snap.Metadata.Index)
-
-		// keep some in memory log entries for slow followers.
-		compacti := uint64(1)
-		if snapi > numberOfCatchUpEntries {
-			compacti = snapi - numberOfCatchUpEntries
-		}
-		err = s.r.raftStorage.Compact(compacti)
-		if err != nil {
-			// the compaction was done asynchronously with the progress of raft.
-			// raft log might already been compact.
-			if err == raft.ErrCompacted {
-				return
-			}
-			c.config.Raft.Logger.Panicf("unexpected compaction error %v", err)
-		}
-		c.config.Raft.Logger.Infof("compacted raft log at %d", compacti)
-	}()
 }
 
 func (c *cluster) Update(evt ClusterChangeEvent) {
