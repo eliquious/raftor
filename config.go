@@ -14,4 +14,5 @@ type ClusterConfig struct {
 	RaftNodeFactory        RaftNodeFactory
 	TransporterFactory     TransporterFactory
 	Raft                   raft.Config
+	Logger                 raft.Logger
 }
