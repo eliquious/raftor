@@ -31,9 +31,6 @@ type RaftNode interface {
 	Commit() chan Commit
 }
 
-// A RaftNodeFactory generates a RaftNode based on a parent context.Context and a Cluster.
-type RaftNodeFactory func(context.Context, Cluster) RaftNode
-
 // NewRaftNode creates a new RaftNode from the context.Context and the given Cluster.
 func NewRaftNode(ctx context.Context, cfg ClusterConfig, tr Transporter) RaftNode {
 	var mu sync.Mutex
