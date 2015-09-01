@@ -1,6 +1,7 @@
 package raftor
 
 import (
+	"bytes"
 	"fmt"
 	"time"
 
@@ -121,7 +122,7 @@ func (c *cluster) start() {
 				}
 
 				// Call Recoverer.Recover to recover Snapshot
-				if err := c.config.Recoverer.Recover(commit.Snapshot.Data); err != nil {
+				if err := c.config.Store.Recover(bytes.NewReader(commit.Snapshot.Data)); err != nil {
 					c.config.Raft.Logger.Panicf("recovery store error: %v", err)
 				}
 				// s.cluster.Recover()
