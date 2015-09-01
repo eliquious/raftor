@@ -48,24 +48,49 @@ type Cluster interface {
 	// LocalNode returns the RaftNode which represents the local node of the cluster.
 	LocalNode() RaftNode
 
-	// Config returns the ClusterConfig which was used to start the cluster.
-	Config() ClusterConfig
-
 	// Stop stops the cluster and triggers the context when finished.
 	Stop()
 }
 
+// NewCluster creates a new Cluster based on the CLusterConfig provided.
 func NewCluster(cfg *ClusterConfig) (Cluster, error) {
+
+	// Create context
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Create Transporter
+	tr := cfg.TransporterFactory(ctx)
+
+	// Create Raft node
+	r := NewRaftNode(ctx, *cfg, tr)
+
+	// Create error channel
+	errorc := make(chan error, 1)
+
 	return &cluster{
-		config: cfg,
+		name:          cfg.Name,
+		snapshotCount: cfg.SnapshotCount,
+		raftNode:      r,
+		transporter:   tr,
+		applier:       cfg.Applier,
+		raftStorage:   cfg.Raft.Storage,
+		store:         cfg.Store,
+		logger:        cfg.Logger,
+		context:       ctx,
+		cancel:        cancel,
+		errorc:        errorc,
 	}, nil
 }
 
 type cluster struct {
-	config *ClusterConfig
-
-	raftNode    RaftNode
-	transporter Transporter
+	name          string
+	snapshotCount uint64
+	raftNode      RaftNode
+	transporter   Transporter
+	applier       Applier
+	raftStorage   raft.Storage
+	store         Store
+	logger        raft.Logger
 
 	context context.Context
 	cancel  context.CancelFunc
@@ -73,19 +98,15 @@ type cluster struct {
 }
 
 func (c *cluster) ID() uint64 {
-	return uint64(murmur.Murmur3([]byte(c.config.Name), murmur.M3Seed))
+	return uint64(murmur.Murmur3([]byte(c.name), murmur.M3Seed))
 }
 
 func (c *cluster) Name() string {
-	return c.config.Name
+	return c.name
 }
 
 func (c *cluster) LocalNode() RaftNode {
 	return c.raftNode
-}
-
-func (c *cluster) Config() ClusterConfig {
-	return *c.config
 }
 
 func (c *cluster) Start() {
@@ -94,10 +115,10 @@ func (c *cluster) Start() {
 
 func (c *cluster) start() {
 
-	// Restore snapshot fro storage
-	snap, err := c.config.Raft.Storage.Snapshot()
+	// Restore snapshot from storage
+	snap, err := c.raftStorage.Snapshot()
 	if err != nil {
-		c.config.Logger.Panicf("Error getting snapshot from raft storage: %v", err)
+		c.logger.Panicf("Error getting snapshot from raft storage: %v", err)
 	}
 
 	// Setup processor
@@ -117,13 +138,13 @@ func (c *cluster) start() {
 			// apply snapshot
 			if !raft.IsEmptySnap(commit.Snapshot) {
 				if commit.Snapshot.Metadata.Index <= appliedi {
-					c.config.Logger.Panicf("snapshot index [%d] should > appliedi[%d] + 1",
+					c.logger.Panicf("snapshot index [%d] should > appliedi[%d] + 1",
 						commit.Snapshot.Metadata.Index, appliedi)
 				}
 
 				// Call Recoverer.Recover to recover Snapshot
-				if err := c.config.Store.Recover(bytes.NewReader(commit.Snapshot.Data)); err != nil {
-					c.config.Logger.Panicf("recovery store error: %v", err)
+				if err := c.store.Recover(bytes.NewReader(commit.Snapshot.Data)); err != nil {
+					c.logger.Panicf("recovery store error: %v", err)
 				}
 				// s.cluster.Recover()
 
@@ -139,14 +160,14 @@ func (c *cluster) start() {
 				appliedi = commit.Snapshot.Metadata.Index
 				snapi = appliedi
 				confState = commit.Snapshot.Metadata.ConfState
-				c.config.Logger.Infof("recovered from incoming snapshot at index %d", snapi)
+				c.logger.Infof("recovered from incoming snapshot at index %d", snapi)
 			}
 
 			// apply entries
 			if len(commit.CommittedEntries) != 0 {
 				firsti := commit.CommittedEntries[0].Index
 				if firsti > appliedi+1 {
-					c.config.Logger.Panicf("first index of committed entry[%d] should <= appliedi[%d] + 1", firsti, appliedi)
+					c.logger.Panicf("first index of committed entry[%d] should <= appliedi[%d] + 1", firsti, appliedi)
 				}
 				var ents []raftpb.Entry
 				if appliedi+1-firsti < uint64(len(commit.CommittedEntries)) {
@@ -169,8 +190,8 @@ func (c *cluster) start() {
 			commit.Errorc <- nil
 
 			// trigger snapshot
-			if appliedi-snapi > c.config.SnapshotCount {
-				c.config.Logger.Infof("start to snapshot (applied: %d, lastsnap: %d)", appliedi, snapi)
+			if appliedi-snapi > c.snapshotCount {
+				c.logger.Infof("start to snapshot (applied: %d, lastsnap: %d)", appliedi, snapi)
 				c.raftNode.Snapshot(appliedi, confState)
 				snapi = appliedi
 			}
@@ -201,8 +222,8 @@ func (c *cluster) apply(es []raftpb.Entry, confState *raftpb.ConfState) (uint64,
 			}
 
 			// Process message
-			if c.config.Applier != nil {
-				c.config.Applier.Apply(e)
+			if c.applier != nil {
+				c.applier.Apply(e)
 			}
 
 		case raftpb.EntryConfChange:
@@ -212,7 +233,7 @@ func (c *cluster) apply(es []raftpb.Entry, confState *raftpb.ConfState) (uint64,
 			shouldstop, err = c.applyConfChange(cc, confState)
 			c.raftNode.Trigger(cc.ID, err)
 		default:
-			c.config.Logger.Panicf("entry type should be either EntryNormal or EntryConfChange")
+			c.logger.Panicf("entry type should be either EntryNormal or EntryConfChange")
 		}
 		c.raftNode.Apply(e)
 		applied = e.Index
