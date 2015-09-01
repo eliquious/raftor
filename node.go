@@ -1,6 +1,7 @@
 package raftor
 
 import (
+	"bytes"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -42,21 +43,23 @@ func NewRaftNode(ctx context.Context, cfg ClusterConfig, tr Transporter) RaftNod
 	hash := murmur.Murmur3([]byte(cfg.LocalNodeName), murmur.M3Seed)
 
 	return &raftNode{
-		index:           0,
-		term:            0,
-		lead:            0,
-		hash:            hash,
-		lt:              time.Now(),
-		Node:            node,
-		parentContext:   ctx,
-		cfg:             cfg.Raft,
-		transporter:     tr,
-		raftStorage:     raft.NewMemoryStorage(),
-		snapshotStorage: cfg.SnapshotStorage,
-		mu:              mu,
-		idgen:           idutil.NewGenerator(uint8(hash), time.Now()),
-		w:               wait.New(),
-		ticker:          time.Tick(500 * time.Millisecond),
+		index:         0,
+		term:          0,
+		lead:          0,
+		hash:          hash,
+		lt:            time.Now(),
+		Node:          node,
+		parentContext: ctx,
+		cfg:           cfg.Raft,
+		numberOfCatchUpEntries: cfg.NumberOfCatchUpEntries,
+		transporter:            tr,
+		store:                  cfg.Store,
+		raftStorage:            raft.NewMemoryStorage(),
+		snapshotStorage:        cfg.SnapshotStorage,
+		mu:                     mu,
+		idgen:                  idutil.NewGenerator(uint8(hash), time.Now()),
+		w:                      wait.New(),
+		ticker:                 time.Tick(500 * time.Millisecond),
 
 		// Channels
 		notifyc: make(chan ClusterChangeEvent, 1),
@@ -76,12 +79,15 @@ type raftNode struct {
 	// last lead elected time
 	lt time.Time
 
+	//
+	numberOfCatchUpEntries uint64
+
 	// node raft.Node
 	raft.Node
 
-	applier     Applier
-	transporter Transporter
-	// cluster         Cluster
+	applier         Applier
+	transporter     Transporter
+	store           Store
 	parentContext   context.Context
 	raftStorage     *raft.MemoryStorage
 	snapshotStorage SnapshotStorage
@@ -116,10 +122,6 @@ func (r *raftNode) Apply(e raftpb.Entry) error {
 	atomic.StoreUint64(&r.index, e.Index)
 	atomic.StoreUint64(&r.term, e.Term)
 	return nil
-}
-
-func (r *raftNode) CreateSnapshot(i uint64, cs *raftpb.ConfState, data []byte) (raftpb.Snapshot, error) {
-	return r.raftStorage.CreateSnapshot(i, cs, data)
 }
 
 // start prepares and starts raftNode in a new goroutine. It is no longer safe
@@ -435,15 +437,55 @@ func (r *raftNode) proposeMessage(p *Proposal) {
 
 		// Close wait channel
 		r.w.Trigger(id, nil) // GC wait
-
-		// close()
-
-		// // Send context error
-		// m.Errorc <- m.Context.Err()
 	}
 }
 
 func (r *raftNode) Snapshot(snapi uint64, confState raftpb.ConfState) {
+	go r.snapshot(snapi, confState)
+}
+
+func (r *raftNode) snapshot(snapi uint64, confState raftpb.ConfState) {
+	var writer bytes.Buffer
+	err := r.store.Snapshot(&writer)
+
+	// TODO: current store will never fail to do a snapshot
+	// what should we do if the store might fail?
+	if err != nil {
+		r.cfg.Logger.Errorf("store save should never fail: %v", err)
+		return
+	}
+	snap, err := r.raftStorage.CreateSnapshot(snapi, &confState, writer.Bytes())
+	if err != nil {
+		// the snapshot was done asynchronously with the progress of raft.
+		// raft might have already got a newer snapshot.
+		if err == raft.ErrSnapOutOfDate {
+			return
+		}
+		r.cfg.Logger.Errorf("unexpected create snapshot error %v", err)
+		return
+	}
+
+	if err := r.snapshotStorage.SaveSnap(snap); err != nil {
+		r.cfg.Logger.Errorf("save snapshot error: %v", err)
+		return
+	}
+	r.cfg.Logger.Infof("saved snapshot at index %d", snap.Metadata.Index)
+
+	// keep some in memory log entries for slow followers.
+	compacti := uint64(1)
+	if snapi > r.numberOfCatchUpEntries {
+		compacti = snapi - r.numberOfCatchUpEntries
+	}
+	err = r.raftStorage.Compact(compacti)
+	if err != nil {
+		// the compaction was done asynchronously with the progress of raft.
+		// raft log might already been compact.
+		if err == raft.ErrCompacted {
+			return
+		}
+		r.cfg.Logger.Panicf("unexpected compaction error %v", err)
+	}
+	r.cfg.Logger.Infof("compacted raft log at %d", compacti)
 }
 
 // // sync proposes a SYNC request and is non-blocking.
