@@ -224,34 +224,38 @@ func (c *cluster) apply(es []raftpb.Entry, confState *raftpb.ConfState) (uint64,
 // invoked with a ConfChange that has already passed through Raft
 func (c *cluster) applyConfChange(cc raftpb.ConfChange, confState *raftpb.ConfState) (bool, error) {
 	*confState = *c.raftNode.ApplyConfChange(cc)
+
+	// Create ClusterChangeEvent
+	evt := ClusterChangeEvent{
+		Member: NewMember(cc.NodeID, cc.Context),
+	}
+
+	// Set ClusterEventType
 	switch cc.Type {
 	case raftpb.ConfChangeAddNode:
-		c.transporter.Update(ClusterChangeEvent{
-			Type:   AddMember,
-			Member: NewMember(cc.NodeID, cc.Context),
-		})
+		evt.Type = AddMember
 	case raftpb.ConfChangeRemoveNode:
-		c.transporter.Update(ClusterChangeEvent{
-			Type:   RemoveMember,
-			Member: NewMember(cc.NodeID, cc.Context),
-		})
+		evt.Type = RemoveMember
 	case raftpb.ConfChangeUpdateNode:
-		c.transporter.Update(ClusterChangeEvent{
-			Type:   UpdateMember,
-			Member: NewMember(cc.NodeID, cc.Context),
-		})
+		evt.Type = UpdateMember
 	}
+
+	// Emit ClusterChangeEvent
+	c.Update(evt)
 	return false, nil
 }
 
+// Update sends the ClusterChangeEvent to the Transporter
 func (c *cluster) Update(evt ClusterChangeEvent) {
 	c.transporter.Update(evt)
 }
 
+// Send sends raftpb.Messages to the Transporter
 func (c *cluster) Send(ms []raftpb.Message) {
 	c.transporter.Send(ms)
 }
 
+// Stop stops the cluster
 func (c *cluster) Stop() {
 	c.cancel()
 }
